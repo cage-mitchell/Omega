@@ -16,6 +16,7 @@
 #include "auxiliaryVars/TracerAuxVars.h"
 #include "auxiliaryVars/VelocityDel2AuxVars.h"
 #include "auxiliaryVars/VorticityAuxVars.h"
+#include "auxiliaryVars/PhysicalMixingAuxVars.h"
 
 #include <memory>
 #include <string>
@@ -34,6 +35,7 @@ class AuxiliaryState {
    // Names of the auxiliary state and its FieldGroup
    std::string Name;
    std::string GroupName;
+   std::string DVDGroupName;
 
    // Auxiliary variables
    KineticAuxVars KineticAux;
@@ -42,6 +44,7 @@ class AuxiliaryState {
    VorticityAuxVars VorticityAux;
    VelocityDel2AuxVars VelocityDel2Aux;
    SurfTracerRestAuxVars SurfTracerRestAux;
+   PhysicalMixingAuxVars PhysicalMixingAux;
 
    ~AuxiliaryState();
 
@@ -88,9 +91,11 @@ class AuxiliaryState {
    /// level
    void computeAll(const OceanState *State, const Array3DReal &TracerArray,
                    int ThickTimeLevel, int VelTimeLevel,
-                   const TimeInterval ProjDt) const;
+                   const TimeInterval ProjDt,
+                   const Array2DReal &VertDiff = Array2DReal()) const;
    void computeAll(const OceanState *State, const Array3DReal &TracerArray,
-                   int TimeLevel, const TimeInterval ProjDt) const;
+                   int TimeLevel, const TimeInterval ProjDt,
+                   const Array2DReal &VertDiff = Array2DReal()) const;
 
  private:
    AuxiliaryState(const std::string &Name, const HorzMesh *Mesh, Halo *MeshHalo,

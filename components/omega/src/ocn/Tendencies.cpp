@@ -1021,6 +1021,7 @@ void Tendencies::computeTracerTendencies(
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
    Array2DReal NormalVelEdge   = State->getNormalVelocity(VelTimeLevel);
    OMEGA_SCOPE(TracerAux, AuxState->TracerAux);
+   OMEGA_SCOPE(PhysicalMixingAux, AuxState->PhysicalMixingAux);
    OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
    OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
    OMEGA_SCOPE(MinLayerEdgeBot, VCoord->MinLayerEdgeBot);
@@ -1045,7 +1046,23 @@ void Tendencies::computeTracerTendencies(
               });
        });
    Pacer::stop("Tend:computeTracerAuxCell", 2);
-
+   const auto &VertDiff = this->VMix->VertDiff;
+   if (VertDiff.extent(0) > 0) {
+      Pacer::start("Tend:computePhysicalMixingAux", 2);
+      parallelForOuter(
+          "computePhysicalMixingAux", {NTracers, Mesh->NCellsAll},
+          KOKKOS_LAMBDA(int LTracer, int ICell, const TeamMember &Team) {
+             const int KMin   = MinLayerCell(ICell);
+             const int KMax   = MaxLayerCell(ICell);
+             const int KRange = vertRangeChunked(KMin, KMax);
+             parallelForInner(
+                 Team, KRange, INNER_LAMBDA(int KChunk) {
+                    PhysicalMixingAux.computeVarsOnCells(
+                        LTracer, ICell, KChunk, VertDiff, TracerArray);
+                 });
+          });
+      Pacer::stop("Tend:computePhysicalMixingAux", 2);
+   }
    computeTracerTendenciesOnly(State, AuxState, TracerArray, ThickTimeLevel,
                                VelTimeLevel, Time);
 
@@ -1066,8 +1083,8 @@ void Tendencies::computeAllTendencies(
                         ///< time stepper stage
 ) {
    AuxState->computeAll(State, TracerArray, ThickTimeLevel, VelTimeLevel,
-                        ProjDt);
-
+                        ProjDt, this->VMix->VertDiff);
+      
    computePseudoThicknessTendenciesOnly(State, AuxState, ThickTimeLevel,
                                         VelTimeLevel, Time);
    computeVelocityTendenciesOnly(State, AuxState, TracerArray, ThickTimeLevel,

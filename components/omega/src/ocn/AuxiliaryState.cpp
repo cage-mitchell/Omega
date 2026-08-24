@@ -6,18 +6,14 @@
 #include "Pacer.h"
 #include "Tendencies.h"
 #include "TimeStepper.h"
-
 namespace OMEGA {
-
 // create the static class members
 AuxiliaryState *AuxiliaryState::DefaultAuxState = nullptr;
 std::map<std::string, std::unique_ptr<AuxiliaryState>>
     AuxiliaryState::AllAuxStates;
-
 static std::string stripDefault(const std::string &Name) {
    return Name != "Default" ? Name : "";
 }
-
 // Constructor. Constructs the member auxiliary variables and registers their
 // fields with IOStreams
 AuxiliaryState::AuxiliaryState(const std::string &Name, const HorzMesh *Mesh,
@@ -30,24 +26,25 @@ AuxiliaryState::AuxiliaryState(const std::string &Name, const HorzMesh *Mesh,
       VelocityDel2Aux(stripDefault(Name), Mesh, VCoord),
       SurfTracerRestAux(stripDefault(Name), Mesh, NTracers),
       TracerAux(stripDefault(Name), Mesh, VCoord, NTracers),
+      PhysicalMixingAux(stripDefault(Name), Mesh, VCoord, NTracers),
       TimeStep(TimeStep) {
-
    GroupName = "AuxiliaryState";
    if (Name != "Default") {
       GroupName.append(Name);
    }
    std::string AuxMeshName = Mesh->MeshName;
-
    auto AuxGroup = FieldGroup::create(GroupName);
-
    KineticAux.registerFields(GroupName, AuxMeshName);
    PseudoThicknessAux.registerFields(GroupName, AuxMeshName);
    VorticityAux.registerFields(GroupName, AuxMeshName);
    VelocityDel2Aux.registerFields(GroupName, AuxMeshName);
    SurfTracerRestAux.registerFields(GroupName, AuxMeshName);
    TracerAux.registerFields(GroupName, AuxMeshName);
+   DVDGroupName = "DVDDiagnostics";
+   if (Name != "Default") DVDGroupName.append(Name);
+   auto DVDGroup = FieldGroup::create(DVDGroupName);
+   PhysicalMixingAux.registerFields(DVDGroupName, AuxMeshName);
 }
-
 // Destructor. Unregisters the fields with IOStreams and destroys this auxiliary
 // state field group.
 AuxiliaryState::~AuxiliaryState() {
@@ -57,53 +54,42 @@ AuxiliaryState::~AuxiliaryState() {
    VelocityDel2Aux.unregisterFields();
    SurfTracerRestAux.unregisterFields();
    TracerAux.unregisterFields();
-
+   PhysicalMixingAux.unregisterFields();
    FieldGroup::destroy(GroupName);
+   FieldGroup::destroy(DVDGroupName);
 }
-
 // Compute auxiliary variables for vertical dynamics
 void AuxiliaryState::computeMomVertAux(const OceanState *State,
                                        const Array3DReal &TracerArray,
                                        int ThickTimeLevel,
                                        int VelTimeLevel) const {
-
    Pacer::start("AuxState:computeMomVertAux", 2);
-
    Eos *EosInstance = Eos::getInstance();
-
    // get pseudo-thickness
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
    // get normal velocity
    Array2DReal NormalVelEdge = State->getNormalVelocity(VelTimeLevel);
-
    // get temperature and salinity
    I4 ConservTempIdx;
    I4 AbsSalinityIdx;
    Tracers::getIndex(ConservTempIdx, "Temperature");
    Tracers::getIndex(AbsSalinityIdx, "Salinity");
-
    const auto ConservTemp =
        Kokkos::subview(TracerArray, ConservTempIdx, Kokkos::ALL, Kokkos::ALL);
    const auto AbsSalinity =
        Kokkos::subview(TracerArray, AbsSalinityIdx, Kokkos::ALL, Kokkos::ALL);
-
    // compute pressure
    const auto &SurfacePressure = VCoord->SurfacePressure;
    VCoord->computePressure(PseudoThickCell, SurfacePressure);
-
    // compute specific volume
    const auto &PressureMid = VCoord->PressureMid;
    EosInstance->computeSpecVol(ConservTemp, AbsSalinity, PressureMid);
-
    // compute geometric height
    VCoord->computeGeomZHeight(PseudoThickCell, EosInstance->SpecVol);
-
    // compute target thickness
    VCoord->computeTargetThickness();
-
    Pacer::stop("AuxState:computeMomVertAux", 2);
 }
-
 // Compute the auxiliary variables needed for momentum equation
 void AuxiliaryState::computeMomAux(const OceanState *State,
                                    const Array3DReal &TracerArray,
@@ -111,12 +97,10 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
                                    const TimeInterval ProjDt) const {
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
    Array2DReal NormalVelEdge   = State->getNormalVelocity(VelTimeLevel);
-
    OMEGA_SCOPE(LocKineticAux, KineticAux);
    OMEGA_SCOPE(LocPseudoThicknessAux, PseudoThicknessAux);
    OMEGA_SCOPE(LocVorticityAux, VorticityAux);
    OMEGA_SCOPE(LocVelocityDel2Aux, VelocityDel2Aux);
-
    OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
    OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
    OMEGA_SCOPE(MinLayerVertexTop, VCoord->MinLayerVertexTop);
@@ -125,20 +109,15 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
    OMEGA_SCOPE(MinLayerEdgeBot, VCoord->MinLayerEdgeBot);
    OMEGA_SCOPE(MaxLayerEdgeBot, VCoord->MaxLayerEdgeBot);
    OMEGA_SCOPE(MaxLayerEdgeTop, VCoord->MaxLayerEdgeTop);
-
    R8 TimeStepSeconds;
    TimeStep.get(TimeStepSeconds, TimeUnits::Seconds);
    R8 ProjDtSeconds;
    ProjDt.get(ProjDtSeconds, TimeUnits::Seconds);
-
    // Sanity checks for the time steps
    OMEGA_REQUIRE(TimeStepSeconds > 0, "TimeStepSeconds has to be positive");
    OMEGA_REQUIRE(ProjDtSeconds > 0, "ProjDtSeconds has to be positive");
-
    Pacer::start("AuxState:computeMomAux", 1);
-
    computeMomVertAux(State, TracerArray, ThickTimeLevel, VelTimeLevel);
-
    Pacer::start("AuxState:vertexAuxState1", 2);
    parallelForOuter(
        "vertexAuxState1", {Mesh->NVerticesAll},
@@ -146,7 +125,6 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
           const int KMin   = MinLayerVertexTop(IVertex);
           const int KMax   = MaxLayerVertexBot(IVertex);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocVorticityAux.computeVarsOnVertex(
@@ -154,7 +132,6 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
               });
        });
    Pacer::stop("AuxState:vertexAuxState1", 2);
-
    Pacer::start("AuxState:cellAuxState1", 2);
    parallelForOuter(
        "cellAuxState1", {Mesh->NCellsAll},
@@ -162,23 +139,19 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
           const int KMin   = MinLayerCell(ICell);
           const int KMax   = MaxLayerCell(ICell);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocKineticAux.computeVarsOnCell(ICell, KChunk, NormalVelEdge);
               });
        });
    Pacer::stop("AuxState:cellAuxState1", 2);
-
    const auto &VelocityDivCell = KineticAux.VelocityDivCell;
    const auto &RelVortVertex   = VorticityAux.RelVortVertex;
-
    // Zero Del2Edge at boundary layers before accumulating over neighbouring
    // edges in computeVarsOnCell/Vertex. Del4 hyperdiffusion reads Del2Edge at
    // all edges sharing a cell or vertex; fill values in boundary layers would
    // corrupt Del2DivCell and Del2RelVortVertex.
    VCoord->zeroEdgeField(VelocityDel2Aux.Del2Edge, Mesh->NEdgesAll);
-
    Pacer::start("AuxState:edgeAuxState2", 2);
    parallelForOuter(
        "edgeAuxState2", {Mesh->NEdgesAll},
@@ -186,7 +159,6 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
           const int KMin   = MinLayerEdgeBot(IEdge);
           const int KMax   = MaxLayerEdgeTop(IEdge);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocPseudoThicknessAux.computeVarsOnEdge(
@@ -195,21 +167,18 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
                      IEdge, KChunk, VelocityDivCell, RelVortVertex);
               });
        });
-
    parallelForOuter(
        "edgeAuxState2", {Mesh->NEdgesAll},
        KOKKOS_LAMBDA(int IEdge, const TeamMember &Team) {
           const int KMin   = MinLayerEdgeTop(IEdge);
           const int KMax   = MaxLayerEdgeBot(IEdge);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocVorticityAux.computeVarsOnEdge(IEdge, KChunk);
               });
        });
    Pacer::stop("AuxState:edgeAuxState2", 2);
-
    Pacer::start("AuxState:vertexAuxState2", 2);
    parallelForOuter(
        "vertexAuxState2", {Mesh->NVerticesAll},
@@ -221,14 +190,12 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
           const int KMin   = MinLayerVertexTop(IVertex);
           const int KMax   = MaxLayerVertexBot(IVertex);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocVelocityDel2Aux.computeVarsOnVertex(IVertex, KChunk);
               });
        });
    Pacer::stop("AuxState:vertexAuxState2", 2);
-
    Pacer::start("AuxState:cellAuxState2", 2);
    parallelForOuter(
        "cellAuxState2", {Mesh->NCellsAll},
@@ -236,49 +203,39 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
           const int KMin   = MinLayerCell(ICell);
           const int KMax   = MaxLayerCell(ICell);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocVelocityDel2Aux.computeVarsOnCell(ICell, KChunk);
               });
        });
    Pacer::stop("AuxState:cellAuxState2", 2);
-
    Pacer::start("AuxState:computeVerticalPseudoVelocity", 2);
-
    const auto &FluxPseudoThickEdge = PseudoThicknessAux.FluxPseudoThickEdge;
    VAdv->computeVerticalPseudoVelocity(NormalVelEdge, FluxPseudoThickEdge,
                                        PseudoThickCell, ProjDtSeconds);
-
    Pacer::stop("AuxState:computeVerticalPseudoVelocity", 2);
-
    Pacer::stop("AuxState:computeMomAux", 1);
 }
-
 // Compute the auxiliary variables
 void AuxiliaryState::computeAll(const OceanState *State,
                                 const Array3DReal &TracerArray,
                                 int ThickTimeLevel, int VelTimeLevel,
-                                const TimeInterval ProjDt) const {
+                                const TimeInterval ProjDt,
+                                const Array2DReal &VertDiff) const {
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
    Array2DReal NormalVelEdge   = State->getNormalVelocity(VelTimeLevel);
-
    const int NTracers = TracerArray.extent_int(0);
-
    OMEGA_SCOPE(LocPseudoThicknessAux, PseudoThicknessAux);
    OMEGA_SCOPE(LocTracerAux, TracerAux);
+   OMEGA_SCOPE(LocPhysicalMixingAux, PhysicalMixingAux);
    OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
    OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
    OMEGA_SCOPE(MinLayerEdgeBot, VCoord->MinLayerEdgeBot);
    OMEGA_SCOPE(MaxLayerEdgeTop, VCoord->MaxLayerEdgeTop);
-
    R8 TimeStepSeconds;
    TimeStep.get(TimeStepSeconds, TimeUnits::Seconds);
-
    Pacer::start("AuxState:computeAll", 1);
-
    computeMomAux(State, TracerArray, ThickTimeLevel, VelTimeLevel, ProjDt);
-
    Pacer::start("AuxState:cellAuxState3", 2);
    parallelForOuter(
        "cellAuxState3", {Mesh->NCellsAll},
@@ -286,7 +243,6 @@ void AuxiliaryState::computeAll(const OceanState *State,
           const int KMin   = MinLayerCell(ICell);
           const int KMax   = MaxLayerCell(ICell);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocPseudoThicknessAux.computeVarsOnCells(
@@ -295,9 +251,7 @@ void AuxiliaryState::computeAll(const OceanState *State,
               });
        });
    Pacer::stop("AuxState:cellAuxState3", 2);
-
    const auto &MeanPseudoThickEdge = PseudoThicknessAux.MeanPseudoThickEdge;
-
    Pacer::start("AuxState:cellAuxState4", 2);
    parallelForOuter(
        "cellAuxState4", {NTracers, Mesh->NCellsAll},
@@ -305,7 +259,6 @@ void AuxiliaryState::computeAll(const OceanState *State,
           const int KMin   = MinLayerCell(ICell);
           const int KMax   = MaxLayerCell(ICell);
           const int KRange = vertRangeChunked(KMin, KMax);
-
           parallelForInner(
               Team, KRange, INNER_LAMBDA(int KChunk) {
                  LocTracerAux.computeVarsOnCells(
@@ -313,16 +266,30 @@ void AuxiliaryState::computeAll(const OceanState *State,
               });
        });
    Pacer::stop("AuxState:cellAuxState4", 2);
-
+   Pacer::start("AuxState:cellAuxState5", 2);
+   if (VertDiff.extent(0) > 0) {
+      parallelForOuter(
+          "cellAuxState5", {NTracers, Mesh->NCellsAll},
+          KOKKOS_LAMBDA(int LTracer, int ICell, const TeamMember &Team) {
+             const int KMin   = MinLayerCell(ICell);
+             const int KMax   = MaxLayerCell(ICell);
+             const int KRange = vertRangeChunked(KMin, KMax);
+             parallelForInner(
+                 Team, KRange, INNER_LAMBDA(int KChunk) {
+                    LocPhysicalMixingAux.computeVarsOnCells(
+                        LTracer, ICell, KChunk, VertDiff, TracerArray);
+                 });
+          });
+   }
+   Pacer::stop("AuxState:cellAuxState5", 2);
    Pacer::stop("AuxState:computeAll", 1);
 }
-
 void AuxiliaryState::computeAll(const OceanState *State,
                                 const Array3DReal &TracerArray, int TimeLevel,
-                                const TimeInterval ProjDt) const {
-   computeAll(State, TracerArray, TimeLevel, TimeLevel, ProjDt);
+                                const TimeInterval ProjDt,
+                                const Array2DReal &VertDiff) const {
+   computeAll(State, TracerArray, TimeLevel, TimeLevel, ProjDt, VertDiff);
 }
-
 // Create a non-default auxiliary state
 AuxiliaryState *AuxiliaryState::create(const std::string &Name,
                                        const HorzMesh *Mesh, Halo *MeshHalo,
@@ -341,21 +308,17 @@ AuxiliaryState *AuxiliaryState::create(const std::string &Name,
    OMEGA_REQUIRE(
        VAdv, "Null VertAdv pointer in AuxiliaryState::create with Name = {}",
        Name);
-
    if (AllAuxStates.find(Name) != AllAuxStates.end()) {
       LOG_ERROR("Attempted to create a new AuxiliaryState with name {} but it "
                 "already exists",
                 Name);
       return nullptr;
    }
-
    auto *NewAuxState = new AuxiliaryState(Name, Mesh, MeshHalo, VCoord, VAdv,
                                           NTracers, TimeStep);
    AllAuxStates.emplace(Name, NewAuxState);
-
    return NewAuxState;
 }
-
 // Create the default auxiliary state. Assumes that HorzMesh, VertCoord,
 // VertAdv, and Halo have been initialized.
 void AuxiliaryState::init() {
@@ -373,33 +336,26 @@ void AuxiliaryState::init() {
    const TimeStepper *DefTimeStepper = TimeStepper::getDefault();
    OMEGA_REQUIRE(DefTimeStepper,
                  "Null default TimeStepper pointer in AuxiliaryState::init");
-
    int NTracers          = Tracers::getNumTracers();
    TimeInterval TimeStep = DefTimeStepper->getTimeStep();
-
    AuxiliaryState::DefaultAuxState = AuxiliaryState::create(
        "Default", DefMesh, DefHalo, DefVCoord, DefVAdv, NTracers, TimeStep);
-
    Config *OmegaConfig = Config::getOmegaConfig();
    OMEGA_REQUIRE(OmegaConfig,
                  "Null OmegaConfig pointer in AuxiliaryState::init");
    DefaultAuxState->readConfigOptions(OmegaConfig);
 }
-
 // Get the default auxiliary state
 AuxiliaryState *AuxiliaryState::getDefault() {
    return AuxiliaryState::DefaultAuxState;
 }
-
 // Get auxiliary state by name
 AuxiliaryState *AuxiliaryState::get(const std::string &Name) {
    // look for an instance of this name
    auto it = AllAuxStates.find(Name);
-
    // if found, return the pointer
    if (it != AllAuxStates.end()) {
       return it->second.get();
-
       // otherwise print error and return null pointer
    } else {
       LOG_ERROR("AuxiliaryState::get: Attempt to retrieve non-existent "
@@ -408,32 +364,25 @@ AuxiliaryState *AuxiliaryState::get(const std::string &Name) {
       return nullptr;
    }
 }
-
 // Remove auxiliary state by name
 void AuxiliaryState::erase(const std::string &Name) {
    AllAuxStates.erase(Name);
 }
-
 // Remove all auxiliary states
 void AuxiliaryState::clear() {
    AllAuxStates.clear();
    DefaultAuxState = nullptr; // prevent dangling pointer
 }
-
 // Read and set config options
 void AuxiliaryState::readConfigOptions(Config *OmegaConfig) {
-
    Error Err; // error code
-
    Config AdvectConfig("Advection");
    Err += OmegaConfig->get(AdvectConfig);
    CHECK_ERROR_ABORT(Err, "AuxiliaryState: Advection group not in Config");
-
    std::string FluxThickTypeStr;
    Err += AdvectConfig.get("FluxThicknessType", FluxThickTypeStr);
    CHECK_ERROR_ABORT(
        Err, "AuxiliaryState: FluxThicknessType not found in AdvectConfig");
-
    if (FluxThickTypeStr == "Center") {
       this->PseudoThicknessAux.FluxThickEdgeChoice =
           FluxThickEdgeOption::Center;
@@ -444,13 +393,11 @@ void AuxiliaryState::readConfigOptions(Config *OmegaConfig) {
       ABORT_ERROR("AuxiliaryState: Unknown FluxThicknessType requested");
    }
 }
-
 //------------------------------------------------------------------------------
 // Perform auxiliary state halo exchange
 // Note that only non-computed auxiliary variables needs to be exchanged
 I4 AuxiliaryState::exchangeHalo() {
    I4 Err = 0;
-
    // Performing halo exchange on individual tracers because full halo exchange
    // on a 2D array assumes the first dimension is the vertical
    const I4 NTracers =
@@ -460,9 +407,6 @@ I4 AuxiliaryState::exchangeHalo() {
           SurfTracerRestAux.TracersMonthlySurfClimoCell, LTracer, Kokkos::ALL);
       Err += MeshHalo->exchangeFullArrayHalo(TracerSurfClimoCell, OnCell);
    }
-
    return Err;
-
 } // end exchangeHalo
-
 } // namespace OMEGA
