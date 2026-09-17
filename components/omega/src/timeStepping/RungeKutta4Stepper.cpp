@@ -71,7 +71,7 @@ void RungeKutta4Stepper::finalizeInit() {
 
 //------------------------------------------------------------------------------
 // Advance the state by one step of the fourth-order Runge Kutta scheme
-void RungeKutta4Stepper::doStep(OceanState *State,   // model state
+void RungeKutta4Stepper::doStepImpl(OceanState *State,   // model state
                                 TimeInstant &SimTime // current simulation time
 ) const {
 

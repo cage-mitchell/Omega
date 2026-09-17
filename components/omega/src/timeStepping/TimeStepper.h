@@ -100,10 +100,22 @@ class TimeStepper {
    virtual ~TimeStepper() = default;
 
    /// The main method that every time stepper needs to define. Advances state
-   /// by one time step, from Time to Time + TimeStep
-   virtual void doStep(OceanState *State,   ///< [inout] model state
-                       TimeInstant &SimTime ///< [inout] current simulation time
+   /// by one time step, from Time to Time + TimeStep. This wraps doStepImpl
+   /// (implemented by each concrete stepper) with logic that must run for
+   /// every stepper, such as resetting the DVD numerical-mixing shadow
+   /// tracers to match the current state.
+   void doStep(OceanState *State,   ///< [inout] model state
+              TimeInstant &SimTime ///< [inout] current simulation time
+   ) const;
+
+ protected:
+   /// The stepper-specific algorithm. Each concrete TimeStepper subclass
+   /// implements this instead of doStep.
+   virtual void doStepImpl(OceanState *State,   ///< [inout] model state
+                          TimeInstant &SimTime ///< [inout] current simulation time
    ) const = 0;
+
+ public:
 
    /// 1st phase of Initialization for the default time stepper
    static void init1();
@@ -258,6 +270,12 @@ class TimeStepper {
        int TimeLevel2,     ///< [in] time level index of the destination data
        const TimeInstant &SimTime ///< [in] current simulation time
    ) const;
+
+   /// Resets the DVD (discrete variance decay) shadow tracers to match
+   /// the current Temperature/Salinity fields, ahead of tendency
+   /// accumulation for this step. No-op if the DVD tracers are not part
+   /// of the active tracer set (NumericalMixingTendency disabled).
+   void prescribeTracers(const Array3DReal &TracerArray) const;
 
    /// Updates tracers
    /// NextTracers = (CurTracers * PseudoThickness2(TimeLevel2)) +

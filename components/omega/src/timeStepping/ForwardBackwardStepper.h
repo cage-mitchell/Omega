@@ -22,7 +22,7 @@ class ForwardBackwardStepper : public TimeStepper {
        std::optional<TimeInstant> InStopTime = std::nullopt);
 
    /// Advance the state by one step of the forward-backward scheme
-   void doStep(OceanState *State,   ///< [inout] model state
+   void doStepImpl(OceanState *State,   ///< [inout] model state
                TimeInstant &SimTime ///< [inout] current simulation time
    ) const override;
 };

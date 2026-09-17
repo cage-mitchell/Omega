@@ -704,11 +704,70 @@ void TimeStepper::prescribeVelocity(OceanState *State1, int TimeLevel1,
 }
 
 //------------------------------------------------------------------------------
+void TimeStepper::doStep(OceanState *State, TimeInstant &SimTime) const {
+   // Reset the DVD (discrete variance decay) shadow tracers to match the
+   // current Temperature/Salinity fields before any stepper-specific
+   // algorithm runs. This must happen for every concrete TimeStepper
+   // subclass, so it lives here once rather than in each subclass's
+   // doStepImpl, where a future stepper could forget it (as
+   // RungeKutta2Stepper and ForwardBackwardStepper currently do).
+   // NOTE: assumes time level 0 is always "current" -- true for every
+   // existing stepper (RK2, RK4, ForwardBackward all define CurLevel/
+   // TracerCurLevel = 0), but not verified as a guaranteed invariant for
+   // future steppers with different NTimeLevels/indexing conventions.
+   prescribeTracers(Tracers::getAll(0));
+
+   doStepImpl(State, SimTime);
+}
+
+//------------------------------------------------------------------------------
 void TimeStepper::prescribeState(OceanState *State1, int TimeLevel1,
                                  OceanState *State2, int TimeLevel2,
                                  const TimeInstant &SimTime) const {
    prescribeThickness(State1, TimeLevel1, State2, TimeLevel2);
    prescribeVelocity(State1, TimeLevel1, State2, TimeLevel2, SimTime);
+}
+
+//------------------------------------------------------------------------------
+// Reset the DVD (discrete variance decay) shadow tracers to match the
+// current Temperature/Salinity fields. No-op if the DVD tracers are not
+// part of the active tracer set (NumericalMixingTendency disabled).
+void TimeStepper::prescribeTracers(const Array3DReal &TracerArray) const {
+
+   if (Tracers::IndxDVDT == -1) {  // -1 == Tracers::IndxInvalid (private, not reachable here)
+      return;
+   }
+
+   const I4 IndxTemp  = Tracers::IndxTemp;
+   const I4 IndxSalt  = Tracers::IndxSalt;
+   const I4 IndxDVDT  = Tracers::IndxDVDT;
+   const I4 IndxDVDS  = Tracers::IndxDVDS;
+   const I4 IndxDVDT2 = Tracers::IndxDVDT2;
+   const I4 IndxDVDS2 = Tracers::IndxDVDS2;
+
+   OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
+   OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
+
+   parallelForOuter(
+       "prescribeTracers", {Mesh->NCellsAll},
+       KOKKOS_LAMBDA(int ICell, const TeamMember &Team) {
+          const int KMin   = MinLayerCell(ICell);
+          const int KMax   = MaxLayerCell(ICell);
+          const int KRange = vertRange(KMin, KMax);
+
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 const int K  = KMin + KChunk;
+                 const Real T = TracerArray(IndxTemp, ICell, K);
+                 const Real S = TracerArray(IndxSalt, ICell, K);
+                 TracerArray(IndxDVDT, ICell, K)  = T;
+                 TracerArray(IndxDVDS, ICell, K)  = S;
+                 TracerArray(IndxDVDT2, ICell, K) = T * T;
+                 TracerArray(IndxDVDS2, ICell, K) = S * S;
+              });
+       });
+
+   Kokkos::fence();
 }
 
 //------------------------------------------------------------------------------

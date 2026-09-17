@@ -370,6 +370,88 @@ void Tendencies::readConfig(Config *OmegaConfig ///< [in] Omega config
       deepCopy(this->SurfaceTracerRestoring.TracerIdsToRestore,
                HostArray1DI4(TracerIdsToRestoreVec.data(),
                              TracerIdsToRestoreVec.size()));
+   } 
+
+   //DVD infrastructure for numerical mixing
+   std::cerr << "DVD DEBUG 1: before Config NumMixConfig ctor" << std::endl;
+   bool NumericalMixingTendencyEnable = false;
+   Config NumMixConfig("NumericalMixingTendency");
+   std::cerr << "DVD DEBUG 2: after ctor, before TendConfig.get" << std::endl;
+   Error NumMixConfigErr = TendConfig.get(NumMixConfig);
+   std::cerr << "DVD DEBUG 3: after TendConfig.get, isSuccess="
+             << NumMixConfigErr.isSuccess() << std::endl;
+   if (NumMixConfigErr.isSuccess()) {
+      std::cerr << "DVD DEBUG 4: before NumMixConfig.get(Enable)" << std::endl;
+      NumMixConfig.get("Enable", NumericalMixingTendencyEnable);
+      std::cerr << "DVD DEBUG 5: after NumMixConfig.get(Enable), value="
+                << NumericalMixingTendencyEnable << std::endl;
+   }
+   std::cerr << "DVD DEBUG 6: NumericalMixingTendencyEnable="
+             << NumericalMixingTendencyEnable << std::endl;
+
+   if (NumericalMixingTendencyEnable) {
+      std::vector<std::string> DVDTracerNames;
+      NumMixConfig.get("TracerIdsForDVD", DVDTracerNames);
+
+      I4 NumInvalidDVDTracers = 0;
+      std::vector<I4> TracerIdsForDVDVec;
+      for (const auto &TracerName : DVDTracerNames) {
+         I4 TracerIndex = -1;
+         Tracers::getIndex(TracerIndex, TracerName);
+         if (TracerIndex == -1) {
+            LOG_ERROR("Tendencies: Tracer {} in TracerIdsForDVD is not "
+                      "defined",
+                      TracerName);
+            NumInvalidDVDTracers++;
+         } else {
+            bool IsDuplicate = false;
+            for (const auto ExistingTracerIndex : TracerIdsForDVDVec) {
+               if (ExistingTracerIndex == TracerIndex) {
+                  IsDuplicate = true;
+                  break;
+               }
+            }
+            if (!IsDuplicate) {
+               TracerIdsForDVDVec.push_back(TracerIndex);
+            }
+         }
+      }
+      if (NumInvalidDVDTracers > 0) {
+         ABORT_ERROR("Tendencies: {} invalid tracer(s) in TracerIdsForDVD "
+                     "configuration",
+                     NumInvalidDVDTracers);
+      }
+
+      this->NTracersForDVD = static_cast<I4>(TracerIdsForDVDVec.size());
+      this->TracerIdsForDVD =
+          Array1DI4("TracerIdsForDVD", this->NTracersForDVD);
+      deepCopy(this->TracerIdsForDVD,
+               HostArray1DI4(TracerIdsForDVDVec.data(),
+                             TracerIdsForDVDVec.size()));
+
+      this->TendHadvDVD = Array3DReal("TendHadvDVD", this->NTracersForDVD,
+                                      Mesh->NCellsSize, VCoord->NVertLayers);
+      this->TendVadvDVD = Array3DReal("TendVadvDVD", this->NTracersForDVD,
+                                      Mesh->NCellsSize, VCoord->NVertLayers);
+
+      Dimension::create("NTracersForDVD", this->NTracersForDVD);
+
+      std::vector<std::string> DimNamesDVD = {"NTracersForDVD", "NCells",
+                                               "NVertLayers"};
+      auto TendHadvDVDField = Field::create(
+          "TendHadvDVD", "Horizontal-advection-only tracer tendency (DVD)",
+          "kg/m^3/s", "none", -9.99E+10, 9.99E+10, 3, DimNamesDVD);
+      auto TendVadvDVDField = Field::create(
+          "TendVadvDVD", "Vertical-advection-only tracer tendency (DVD)",
+          "kg/m^3/s", "none", -9.99E+10, 9.99E+10, 3, DimNamesDVD);
+      TendHadvDVDField->attachData<Array3DReal>(this->TendHadvDVD);
+      TendVadvDVDField->attachData<Array3DReal>(this->TendVadvDVD);
+
+      // shared group with Phase 1's physical mixing field(s)
+      if (!FieldGroup::exists("DVDDiagnostics"))
+         FieldGroup::create("DVDDiagnostics");
+      FieldGroup::addFieldToGroup("TendHadvDVD", "DVDDiagnostics");
+      FieldGroup::addFieldToGroup("TendVadvDVD", "DVDDiagnostics");
    }
 
    // Validate VertMix tendency
@@ -874,6 +956,31 @@ void Tendencies::computeTracerTendenciesOnly(
       Pacer::stop("Tend:tracerHorzAdv", 2);
    }
 
+   // DVD: capture the horizontal-advection-only tendency for the DVD
+   // tracers. TracerTend was zeroed above, so this is simply what
+   // TracerHorzAdv just wrote for these indices.
+   if (NTracersForDVD > 0) {
+      OMEGA_SCOPE(LocTendHadvDVD, TendHadvDVD);
+      OMEGA_SCOPE(LocTracerIdsForDVD, TracerIdsForDVD);
+      parallelForOuter(
+          {NTracersForDVD, Mesh->NCellsAll},
+          KOKKOS_LAMBDA(int D, int ICell, const TeamMember &Team) {
+             const int L      = LocTracerIdsForDVD(D);
+             const int KMin   = MinLayerCell(ICell);
+             const int KMax   = MaxLayerCell(ICell);
+             const int KRange = vertRangeChunked(KMin, KMax);
+             parallelForInner(
+                 Team, KRange, INNER_LAMBDA(int KChunk) {
+                    const int KStart = chunkStart(KChunk, KMin);
+                    const int KLen   = chunkLength(KChunk, KStart, KMax);
+                    for (int KVec = 0; KVec < KLen; ++KVec) {
+                       const int K = KStart + KVec;
+                       LocTendHadvDVD(D, ICell, K) = LocTracerTend(L, ICell, K);
+                    }
+                 });
+          });
+   }
+
    // compute tracer diffusion
    const Array2DReal &MeanPseudoThickEdge =
        AuxState->PseudoThicknessAux.MeanPseudoThickEdge;
@@ -915,6 +1022,33 @@ void Tendencies::computeTracerTendenciesOnly(
       Pacer::stop("Tend:tracerHyperDiff", 2);
    }
 
+   // DVD: snapshot TracerTend for the DVD tracers immediately before
+   // vertical advection runs. Vertical advection accumulates into
+   // TracerTend rather than overwriting it, so isolating its
+   // contribution requires a before/after difference (unlike
+   // horizontal advection above, which writes TracerTend fresh).
+   if (NTracersForDVD > 0) {
+      OMEGA_SCOPE(LocTendVadvDVD, TendVadvDVD);
+      OMEGA_SCOPE(LocTracerIdsForDVD, TracerIdsForDVD);
+      parallelForOuter(
+          {NTracersForDVD, Mesh->NCellsAll},
+          KOKKOS_LAMBDA(int D, int ICell, const TeamMember &Team) {
+             const int L      = LocTracerIdsForDVD(D);
+             const int KMin   = MinLayerCell(ICell);
+             const int KMax   = MaxLayerCell(ICell);
+             const int KRange = vertRangeChunked(KMin, KMax);
+             parallelForInner(
+                 Team, KRange, INNER_LAMBDA(int KChunk) {
+                    const int KStart = chunkStart(KChunk, KMin);
+                    const int KLen   = chunkLength(KChunk, KStart, KMax);
+                    for (int KVec = 0; KVec < KLen; ++KVec) {
+                       const int K = KStart + KVec;
+                       LocTendVadvDVD(D, ICell, K) = LocTracerTend(L, ICell, K);
+                    }
+                 });
+          });
+   }
+
    // compute tracer tendency from vertical advection
    Pacer::start("Tend:computeTracerVAdvTend", 2);
    Array2DReal ThicknessForVAdv;
@@ -926,6 +1060,32 @@ void Tendencies::computeTracerTendenciesOnly(
    VAdv->computeTracerVAdvTend(LocTracerTend, TracerArray, ThicknessForVAdv,
                                TimeStep);
    Pacer::stop("Tend:computeTracerVAdvTend", 2);
+
+   // DVD: finish the before/after difference started above,
+   // converting the snapshot in TendVadvDVD into the
+   // vertical-advection-only tendency for the DVD tracers.
+   if (NTracersForDVD > 0) {
+      OMEGA_SCOPE(LocTendVadvDVD, TendVadvDVD);
+      OMEGA_SCOPE(LocTracerIdsForDVD, TracerIdsForDVD);
+      parallelForOuter(
+          {NTracersForDVD, Mesh->NCellsAll},
+          KOKKOS_LAMBDA(int D, int ICell, const TeamMember &Team) {
+             const int L      = LocTracerIdsForDVD(D);
+             const int KMin   = MinLayerCell(ICell);
+             const int KMax   = MaxLayerCell(ICell);
+             const int KRange = vertRangeChunked(KMin, KMax);
+             parallelForInner(
+                 Team, KRange, INNER_LAMBDA(int KChunk) {
+                    const int KStart = chunkStart(KChunk, KMin);
+                    const int KLen   = chunkLength(KChunk, KStart, KMax);
+                    for (int KVec = 0; KVec < KLen; ++KVec) {
+                       const int K = KStart + KVec;
+                       LocTendVadvDVD(D, ICell, K) =
+                           LocTracerTend(L, ICell, K) - LocTendVadvDVD(D, ICell, K);
+                    }
+                 });
+          });
+   }
 
    // compute tracer surface restoring
    const Array2DReal &TracersMonthlySurfClimo =
@@ -944,6 +1104,35 @@ void Tendencies::computeTracerTendenciesOnly(
                                        TracersMonthlySurfClimo, TracerArray);
           });
       Pacer::stop("Tend:surfaceTracerRestoring", 2);
+   }
+
+   // DVD: final override -- force TracerTend for the DVD tracers to be
+   // exactly the horizontal + vertical advection-only tendency captured
+   // above, discarding whatever diffusion, hyperdiffusion, or surface
+   // restoring wrote into these indices along the way. This must run
+   // after every other term above has had a chance to touch TracerTend.
+   if (NTracersForDVD > 0) {
+      OMEGA_SCOPE(LocTendHadvDVD, TendHadvDVD);
+      OMEGA_SCOPE(LocTendVadvDVD, TendVadvDVD);
+      OMEGA_SCOPE(LocTracerIdsForDVD, TracerIdsForDVD);
+      parallelForOuter(
+          {NTracersForDVD, Mesh->NCellsAll},
+          KOKKOS_LAMBDA(int D, int ICell, const TeamMember &Team) {
+             const int L      = LocTracerIdsForDVD(D);
+             const int KMin   = MinLayerCell(ICell);
+             const int KMax   = MaxLayerCell(ICell);
+             const int KRange = vertRangeChunked(KMin, KMax);
+             parallelForInner(
+                 Team, KRange, INNER_LAMBDA(int KChunk) {
+                    const int KStart = chunkStart(KChunk, KMin);
+                    const int KLen   = chunkLength(KChunk, KStart, KMax);
+                    for (int KVec = 0; KVec < KLen; ++KVec) {
+                       const int K = KStart + KVec;
+                       LocTracerTend(L, ICell, K) =
+                           LocTendHadvDVD(D, ICell, K) + LocTendVadvDVD(D, ICell, K);
+                    }
+                 });
+          });
    }
 
    Pacer::stop("Tend:computeTracerTendenciesOnly", 1);
@@ -1021,7 +1210,6 @@ void Tendencies::computeTracerTendencies(
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
    Array2DReal NormalVelEdge   = State->getNormalVelocity(VelTimeLevel);
    OMEGA_SCOPE(TracerAux, AuxState->TracerAux);
-   OMEGA_SCOPE(PhysicalMixingAux, AuxState->PhysicalMixingAux);
    OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
    OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
    OMEGA_SCOPE(MinLayerEdgeBot, VCoord->MinLayerEdgeBot);
@@ -1046,23 +1234,16 @@ void Tendencies::computeTracerTendencies(
               });
        });
    Pacer::stop("Tend:computeTracerAuxCell", 2);
-   const auto &VertDiff = this->VMix->VertDiff;
-   if (VertDiff.extent(0) > 0) {
-      Pacer::start("Tend:computePhysicalMixingAux", 2);
-      parallelForOuter(
-          "computePhysicalMixingAux", {NTracers, Mesh->NCellsAll},
-          KOKKOS_LAMBDA(int LTracer, int ICell, const TeamMember &Team) {
-             const int KMin   = MinLayerCell(ICell);
-             const int KMax   = MaxLayerCell(ICell);
-             const int KRange = vertRangeChunked(KMin, KMax);
-             parallelForInner(
-                 Team, KRange, INNER_LAMBDA(int KChunk) {
-                    PhysicalMixingAux.computeVarsOnCells(
-                        LTracer, ICell, KChunk, VertDiff, TracerArray);
-                 });
-          });
-      Pacer::stop("Tend:computePhysicalMixingAux", 2);
-   }
+   // NOTE: The physical mixing diagnostic (PhysicalMixingAux) is
+   // deliberately NOT computed here. This function can be called once per
+   // stage/stepper-substep on provisional tracer state and on a VertDiff
+   // that has not yet been refreshed for the current time step (VertDiff is
+   // only finalized once, inside VertMix::VertMixImplicit, which runs after
+   // the full step's tracer update). Computing the diagnostic here would
+   // make it reflect stale, intermediate values. It is instead computed
+   // once per step, after the implicit vertical mixing solve, via
+   // AuxiliaryState::computePhysicalMixing (called from
+   // VertMix::VertMixImplicit).
    computeTracerTendenciesOnly(State, AuxState, TracerArray, ThickTimeLevel,
                                VelTimeLevel, Time);
 

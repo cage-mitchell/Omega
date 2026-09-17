@@ -17,6 +17,10 @@ inline static I4 IndxSalt   = Tracers::IndxInvalid;
 inline static I4 IndxDebug1 = Tracers::IndxInvalid;
 inline static I4 IndxDebug2 = Tracers::IndxInvalid;
 inline static I4 IndxDebug3 = Tracers::IndxInvalid;
+inline static I4 IndxDVDT  = Tracers::IndxInvalid;
+inline static I4 IndxDVDS  = Tracers::IndxInvalid;
+inline static I4 IndxDVDT2 = Tracers::IndxInvalid;
+inline static I4 IndxDVDS2 = Tracers::IndxInvalid;
 
 // Tracer definitions packaged in a defineAllTracers function
 static void defineAllTracers() {
@@ -35,4 +39,12 @@ static void defineAllTracers() {
    define("Debug1", "Debug Tracer 1", "none", "none", 0.0, 100.0, IndxDebug1);
    define("Debug2", "Debug Tracer 2", "none", "none", 0.0, 100.0, IndxDebug2);
    define("Debug3", "Debug Tracer 3", "none", "none", 0.0, 100.0, IndxDebug3);
+   define("DVD_T", "Advection-only Temperature (DVD)", "degree_C",
+          "none", -273.15, 100.0, IndxDVDT);
+   define("DVD_S", "Advection-only Salinity (DVD)", "g kg-1",
+          "none", 0.0, 50.0, IndxDVDS);
+   define("DVD_T2", "Advection-only Temperature Squared (DVD)",
+          "degree_C2", "none", 0.0, 1.0e4, IndxDVDT2);
+   define("DVD_S2", "Advection-only Salinity Squared (DVD)",
+          "(g kg-1)2", "none", 0.0, 2.5e3, IndxDVDS2);
 }
