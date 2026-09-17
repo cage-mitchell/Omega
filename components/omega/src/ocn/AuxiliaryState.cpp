@@ -42,7 +42,8 @@ AuxiliaryState::AuxiliaryState(const std::string &Name, const HorzMesh *Mesh,
    TracerAux.registerFields(GroupName, AuxMeshName);
    DVDGroupName = "DVDDiagnostics";
    if (Name != "Default") DVDGroupName.append(Name);
-   auto DVDGroup = FieldGroup::create(DVDGroupName);
+   if (!FieldGroup::exists(DVDGroupName))
+      FieldGroup::create(DVDGroupName);
    PhysicalMixingAux.registerFields(DVDGroupName, AuxMeshName);
 }
 // Destructor. Unregisters the fields with IOStreams and destroys this auxiliary
@@ -227,7 +228,6 @@ void AuxiliaryState::computeAll(const OceanState *State,
    const int NTracers = TracerArray.extent_int(0);
    OMEGA_SCOPE(LocPseudoThicknessAux, PseudoThicknessAux);
    OMEGA_SCOPE(LocTracerAux, TracerAux);
-   OMEGA_SCOPE(LocPhysicalMixingAux, PhysicalMixingAux);
    OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
    OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
    OMEGA_SCOPE(MinLayerEdgeBot, VCoord->MinLayerEdgeBot);
@@ -266,22 +266,15 @@ void AuxiliaryState::computeAll(const OceanState *State,
               });
        });
    Pacer::stop("AuxState:cellAuxState4", 2);
-   Pacer::start("AuxState:cellAuxState5", 2);
-   if (VertDiff.extent(0) > 0) {
-      parallelForOuter(
-          "cellAuxState5", {NTracers, Mesh->NCellsAll},
-          KOKKOS_LAMBDA(int LTracer, int ICell, const TeamMember &Team) {
-             const int KMin   = MinLayerCell(ICell);
-             const int KMax   = MaxLayerCell(ICell);
-             const int KRange = vertRangeChunked(KMin, KMax);
-             parallelForInner(
-                 Team, KRange, INNER_LAMBDA(int KChunk) {
-                    LocPhysicalMixingAux.computeVarsOnCells(
-                        LTracer, ICell, KChunk, VertDiff, TracerArray);
-                 });
-          });
-   }
-   Pacer::stop("AuxState:cellAuxState5", 2);
+   // NOTE: The physical mixing diagnostic (PhysicalMixingAux) is
+   // deliberately NOT computed here. computeAll is invoked once per RK
+   // stage on provisional tracer state, and (via the VertDiff default
+   // argument) on a VertDiff that has not yet been refreshed for this time
+   // step. Computing the diagnostic here would make it reflect stale,
+   // intermediate values rather than the finalized step. It is instead
+   // computed once per step, after the implicit vertical mixing solve, via
+   // AuxiliaryState::computePhysicalMixing (called from
+   // VertMix::VertMixImplicit).
    Pacer::stop("AuxState:computeAll", 1);
 }
 void AuxiliaryState::computeAll(const OceanState *State,
@@ -290,6 +283,45 @@ void AuxiliaryState::computeAll(const OceanState *State,
                                 const Array2DReal &VertDiff) const {
    computeAll(State, TracerArray, TimeLevel, TimeLevel, ProjDt, VertDiff);
 }
+
+// Compute the physical mixing diagnostic on the finalized tracer and
+// vertical diffusivity fields for this time step. This must be called once
+// per step, after the RK stage loop has combined the final state and after
+// the implicit vertical mixing solve has refreshed VertDiff -- never from
+// inside the per-stage computeAll path.
+void AuxiliaryState::computePhysicalMixing(const Array3DReal &TracerArray,
+                                           const Array2DReal &VertDiff) const {
+   if (VertDiff.extent(0) == 0)
+      return;
+
+   const int NTracers = TracerArray.extent_int(0);
+   OMEGA_SCOPE(LocPhysicalMixingAux, PhysicalMixingAux);
+   OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
+   OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
+
+   Pacer::start("AuxState:computePhysicalMixing", 1);
+   parallelForOuter(
+       "computePhysicalMixing", {NTracers, Mesh->NCellsAll},
+       KOKKOS_LAMBDA(int LTracer, int ICell, const TeamMember &Team) {
+          // Skip DVD shadow tracers -- physical mixing of an advection-only
+          // squared-tracer copy is meaningless, and computing it wastes
+          // cycles.
+          if (LTracer == Tracers::IndxDVDT || LTracer == Tracers::IndxDVDS ||
+              LTracer == Tracers::IndxDVDT2 || LTracer == Tracers::IndxDVDS2)
+             return;
+
+          const int KMin   = MinLayerCell(ICell);
+          const int KMax   = MaxLayerCell(ICell);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocPhysicalMixingAux.computeVarsOnCells(
+                     LTracer, ICell, KChunk, VertDiff, TracerArray);
+              });
+       });
+   Pacer::stop("AuxState:computePhysicalMixing", 1);
+}
+
 // Create a non-default auxiliary state
 AuxiliaryState *AuxiliaryState::create(const std::string &Name,
                                        const HorzMesh *Mesh, Halo *MeshHalo,

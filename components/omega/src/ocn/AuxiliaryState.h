@@ -97,6 +97,14 @@ class AuxiliaryState {
                    int TimeLevel, const TimeInterval ProjDt,
                    const Array2DReal &VertDiff = Array2DReal()) const;
 
+   /// Compute the physical mixing diagnostic once a time step's tracer and
+   /// vertical diffusivity fields are fully finalized (i.e. after the RK
+   /// stage loop and the implicit vertical mixing solve have both
+   /// completed). This is intentionally NOT invoked from computeAll, since
+   /// computeAll runs once per RK stage on provisional state/diffusivity.
+   void computePhysicalMixing(const Array3DReal &TracerArray,
+                              const Array2DReal &VertDiff) const;
+
  private:
    AuxiliaryState(const std::string &Name, const HorzMesh *Mesh, Halo *MeshHalo,
                   VertCoord *VCoord, VertAdv *VAdv, int NTracers,

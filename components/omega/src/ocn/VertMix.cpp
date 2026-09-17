@@ -577,6 +577,16 @@ void VertMix::applyTracerVertMixImplicit(
       const int LocVecLength = VecLength;
 
       for (int L = 0; L < NTracers; ++L) {
+         // DVD shadow tracers are advection-only by construction (see the
+         // final-override block in Tendencies.cpp). This implicit solve
+         // modifies TracerArray directly, bypassing TracerTend entirely, so
+         // without this skip the shadow tracers would silently pick up a
+         // vertical-mixing contribution that breaks the advection-only
+         // invariant M_num's derivation depends on.
+         if (L == Tracers::IndxDVDT || L == Tracers::IndxDVDS ||
+             L == Tracers::IndxDVDT2 || L == Tracers::IndxDVDS2)
+            continue;
+
          parallelForOuter(
              LConfig, KOKKOS_LAMBDA(int, const TeamMember &Team) {
                 const int IStart = Team.league_rank() * LocVecLength;
@@ -727,6 +737,14 @@ void VertMix::VertMixImplicit(OceanState *State, AuxiliaryState *AuxState,
    // Apply implicit mixing to tracers
    applyTracerVertMixImplicit(State, AuxState, TracerArray, NTracers, TimeLevel,
                               TimeLevel);
+
+   // Compute the physical mixing diagnostic now that both the tracer field
+   // (fully combined across RK stages and implicitly mixed) and VertDiff
+   // (freshly computed above by computeVertMix) are finalized for this time
+   // step. This is called once per step, here, rather than from inside
+   // AuxiliaryState::computeAll, since computeAll runs once per RK stage on
+   // provisional state/diffusivity.
+   AuxState->computePhysicalMixing(TracerArray, VertDiff);
 
 } // VertMixImplicit
 
