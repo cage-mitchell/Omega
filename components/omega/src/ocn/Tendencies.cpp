@@ -577,7 +577,7 @@ Tendencies::Tendencies(const std::string &Name_, ///< [in] Name for tendencies
       SfcTracerForcing(Mesh, VCoord, Tracers::IndxTemp, Tracers::IndxSalt,
                        EqState),
       TracerDiffusion(Mesh, VCoord), KPPNonLocalTracerFlux(Mesh, VCoord),
-      TracerHyperDiff(Mesh, VCoord), TracerHorzAdv(Mesh, VCoord),
+      TracerHyperDiff(Mesh, VCoord), TracerHorzAdv(Mesh, VCoord, VAdv_), 
       SurfaceTracerRestoring(Mesh), CustomThicknessTend(InCustomThicknessTend),
       CustomVelocityTend(InCustomVelocityTend), EqState(EqState), PGrad(PGrad),
       VMix(VMix) {
