@@ -71,6 +71,14 @@ class Tendencies {
    Array2DReal NormalVelocityTend;
    Array3DReal TracerTend;
 
+   // DVD (numerical mixing) bookkeeping — see computeTracerTendenciesOnly.
+   // Mirrors SurfaceTracerRestoring's NTracersToRestore/TracerIdsToRestore.
+   I4 NTracersForDVD = 0;      ///< number of tracers flagged for DVD (0 == off)
+   Array1DI4 TracerIdsForDVD;  ///< global tracer indices flagged for DVD
+   Array3DReal TendHadvDVD;    ///< [NTracersForDVD, NCells, NVertLayers]
+                               ///< horizontal-advection-only tendency
+   Array3DReal TendVadvDVD;    ///< same, vertical-advection-only
+
    // Instances of tendency terms
    PseudoThicknessFluxDivOnCell PseudoThicknessFluxDiv;
    PotentialVortHAdvOnEdge PotentialVortHAdv;

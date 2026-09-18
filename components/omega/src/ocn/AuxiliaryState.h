@@ -17,6 +17,7 @@
 #include "auxiliaryVars/TransportAuxVars.h"
 #include "auxiliaryVars/VelocityDel2AuxVars.h"
 #include "auxiliaryVars/VorticityAuxVars.h"
+#include "auxiliaryVars/PhysicalMixingAuxVars.h"
 
 #include <memory>
 #include <string>
@@ -35,6 +36,7 @@ class AuxiliaryState {
    // Names of the auxiliary state and its FieldGroup
    std::string Name;
    std::string GroupName;
+   std::string DVDGroupName;
 
    // Auxiliary variables
    KineticAuxVars KineticAux;
@@ -43,6 +45,7 @@ class AuxiliaryState {
    VorticityAuxVars VorticityAux;
    VelocityDel2AuxVars VelocityDel2Aux;
    SurfTracerRestAuxVars SurfTracerRestAux;
+   PhysicalMixingAuxVars PhysicalMixingAux;
    TransportAuxVars TransportAux;
 
    ~AuxiliaryState();
@@ -106,9 +109,19 @@ class AuxiliaryState {
    /// level
    void computeAll(const OceanState *State, const Array3DReal &TracerArray,
                    int ThickTimeLevel, int VelTimeLevel,
-                   const TimeInterval ProjDt) const;
+                   const TimeInterval ProjDt,
+                   const Array2DReal &VertDiff = Array2DReal()) const;
    void computeAll(const OceanState *State, const Array3DReal &TracerArray,
-                   int TimeLevel, const TimeInterval ProjDt) const;
+                   int TimeLevel, const TimeInterval ProjDt,
+                   const Array2DReal &VertDiff = Array2DReal()) const;
+
+   /// Compute the physical mixing diagnostic once a time step's tracer and
+   /// vertical diffusivity fields are fully finalized (i.e. after the RK
+   /// stage loop and the implicit vertical mixing solve have both
+   /// completed). This is intentionally NOT invoked from computeAll, since
+   /// computeAll runs once per RK stage on provisional state/diffusivity.
+   void computePhysicalMixing(const Array3DReal &TracerArray,
+                              const Array2DReal &VertDiff) const;
 
    /// Compute auxiliary variables needed for thickness and tracer tendencies.
    void computePseudoThicknessTracerAux(

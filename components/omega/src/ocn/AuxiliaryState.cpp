@@ -6,18 +6,14 @@
 #include "Pacer.h"
 #include "Tendencies.h"
 #include "TimeStepper.h"
-
 namespace OMEGA {
-
 // create the static class members
 AuxiliaryState *AuxiliaryState::DefaultAuxState = nullptr;
 std::map<std::string, std::unique_ptr<AuxiliaryState>>
     AuxiliaryState::AllAuxStates;
-
 static std::string stripDefault(const std::string &Name) {
    return Name != "Default" ? Name : "";
 }
-
 // Constructor. Constructs the member auxiliary variables and registers their
 // fields with IOStreams
 AuxiliaryState::AuxiliaryState(const std::string &Name, const HorzMesh *Mesh,
@@ -30,16 +26,14 @@ AuxiliaryState::AuxiliaryState(const std::string &Name, const HorzMesh *Mesh,
       VelocityDel2Aux(stripDefault(Name), Mesh, VCoord),
       SurfTracerRestAux(stripDefault(Name), Mesh, NTracers),
       TracerAux(stripDefault(Name), Mesh, VCoord, NTracers),
+      PhysicalMixingAux(stripDefault(Name), Mesh, VCoord, NTracers),
       TransportAux(stripDefault(Name), Mesh, VCoord), TimeStep(TimeStep) {
-
    GroupName = "AuxiliaryState";
    if (Name != "Default") {
       GroupName.append(Name);
    }
    std::string AuxMeshName = Mesh->MeshName;
-
    auto AuxGroup = FieldGroup::create(GroupName);
-
    KineticAux.registerFields(GroupName, AuxMeshName);
    PseudoThicknessAux.registerFields(GroupName, AuxMeshName);
    VorticityAux.registerFields(GroupName, AuxMeshName);
@@ -47,8 +41,12 @@ AuxiliaryState::AuxiliaryState(const std::string &Name, const HorzMesh *Mesh,
    SurfTracerRestAux.registerFields(GroupName, AuxMeshName);
    TracerAux.registerFields(GroupName, AuxMeshName);
    TransportAux.registerFields(GroupName, AuxMeshName);
+   DVDGroupName = "DVDDiagnostics";
+   if (Name != "Default") DVDGroupName.append(Name);
+   if (!FieldGroup::exists(DVDGroupName))
+      FieldGroup::create(DVDGroupName);
+   PhysicalMixingAux.registerFields(DVDGroupName, AuxMeshName);
 }
-
 // Destructor. Unregisters the fields with IOStreams and destroys this auxiliary
 // state field group.
 AuxiliaryState::~AuxiliaryState() {
@@ -59,41 +57,33 @@ AuxiliaryState::~AuxiliaryState() {
    SurfTracerRestAux.unregisterFields();
    TracerAux.unregisterFields();
    TransportAux.unregisterFields();
-
+   PhysicalMixingAux.unregisterFields();
    FieldGroup::destroy(GroupName);
+   FieldGroup::destroy(DVDGroupName);
 }
-
 // Compute auxiliary variables for vertical dynamics
 void AuxiliaryState::computeMomVertAux(const OceanState *State,
                                        const Array3DReal &TracerArray,
                                        int ThickTimeLevel) const {
-
    Pacer::start("AuxState:computeMomVertAux", 2);
-
    Eos *EosInstance = Eos::getInstance();
-
    // get pseudo-thickness
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
-
    // get temperature and salinity
    I4 ConservTempIdx;
    I4 AbsSalinityIdx;
    Tracers::getIndex(ConservTempIdx, "Temperature");
    Tracers::getIndex(AbsSalinityIdx, "Salinity");
-
    const auto ConservTemp =
        Kokkos::subview(TracerArray, ConservTempIdx, Kokkos::ALL, Kokkos::ALL);
    const auto AbsSalinity =
        Kokkos::subview(TracerArray, AbsSalinityIdx, Kokkos::ALL, Kokkos::ALL);
-
    // compute pressure
    const auto &SurfacePressure = VCoord->SurfacePressure;
    VCoord->computePressure(PseudoThickCell, SurfacePressure);
-
    // compute specific volume
    const auto &PressureMid = VCoord->PressureMid;
    EosInstance->computeSpecVol(ConservTemp, AbsSalinity, PressureMid);
-
    // compute geometric height
    VCoord->computeGeomZHeight(PseudoThickCell, EosInstance->SpecVol);
 
@@ -101,7 +91,6 @@ void AuxiliaryState::computeMomVertAux(const OceanState *State,
 
    // compute target thickness
    VCoord->computeTargetThickness();
-
    Pacer::stop("AuxState:computeMomVertAux", 2);
 }
 
@@ -180,12 +169,10 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
 
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
    Array2DReal NormalVelEdge   = State->getNormalVelocity(VelTimeLevel);
-
    OMEGA_SCOPE(LocKineticAux, KineticAux);
    OMEGA_SCOPE(LocPseudoThicknessAux, PseudoThicknessAux);
    OMEGA_SCOPE(LocVorticityAux, VorticityAux);
    OMEGA_SCOPE(LocVelocityDel2Aux, VelocityDel2Aux);
-
    OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
    OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
    OMEGA_SCOPE(MinLayerVertexTop, VCoord->MinLayerVertexTop);
@@ -194,95 +181,118 @@ void AuxiliaryState::computeMomAux(const OceanState *State,
    OMEGA_SCOPE(MinLayerEdgeBot, VCoord->MinLayerEdgeBot);
    OMEGA_SCOPE(MaxLayerEdgeBot, VCoord->MaxLayerEdgeBot);
    OMEGA_SCOPE(MaxLayerEdgeTop, VCoord->MaxLayerEdgeTop);
-
    R8 TimeStepSeconds;
    TimeStep.get(TimeStepSeconds, TimeUnits::Seconds);
    R8 ProjDtSeconds;
    ProjDt.get(ProjDtSeconds, TimeUnits::Seconds);
-
    // Sanity checks for the time steps
    OMEGA_REQUIRE(TimeStepSeconds > 0, "TimeStepSeconds has to be positive");
    OMEGA_REQUIRE(ProjDtSeconds > 0, "ProjDtSeconds has to be positive");
-
    Pacer::start("AuxState:computeMomAux", 1);
-
    computeMomVertAux(State, TracerArray, ThickTimeLevel);
-
    Pacer::start("AuxState:vertexAuxState1", 2);
    parallelForOuter(
        "vertexAuxState1",
        LaunchConfig({Mesh->NVerticesAll},
                     TeamScratch<Real>(2 * VCoord->NVertLayers)),
        KOKKOS_LAMBDA(int IVertex, const TeamMember &Team) {
-          LocVorticityAux.computeVarsOnVertex(Team, IVertex, PseudoThickCell,
-                                              NormalVelEdge);
+          const int KMin   = MinLayerVertexTop(IVertex);
+          const int KMax   = MaxLayerVertexBot(IVertex);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocVorticityAux.computeVarsOnVertex(
+                     IVertex, KChunk, PseudoThickCell, NormalVelEdge);
+              });
        });
    Pacer::stop("AuxState:vertexAuxState1", 2);
-
    Pacer::start("AuxState:cellAuxState1", 2);
    parallelForOuter(
        "cellAuxState1",
        LaunchConfig({Mesh->NCellsAll},
                     TeamScratch<Real>(2 * VCoord->NVertLayers)),
        KOKKOS_LAMBDA(int ICell, const TeamMember &Team) {
-          LocKineticAux.computeVarsOnCell(Team, ICell, NormalVelEdge);
+          const int KMin   = MinLayerCell(ICell);
+          const int KMax   = MaxLayerCell(ICell);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocKineticAux.computeVarsOnCell(ICell, KChunk, NormalVelEdge);
+              });
        });
    Pacer::stop("AuxState:cellAuxState1", 2);
-
    const auto &VelocityDivCell = KineticAux.VelocityDivCell;
    const auto &RelVortVertex   = VorticityAux.RelVortVertex;
-
    // Zero Del2Edge at boundary layers before accumulating over neighbouring
    // edges in computeVarsOnCell/Vertex. Del4 hyperdiffusion reads Del2Edge at
    // all edges sharing a cell or vertex; fill values in boundary layers would
    // corrupt Del2DivCell and Del2RelVortVertex.
    VCoord->zeroEdgeField(VelocityDel2Aux.Del2Edge, Mesh->NEdgesAll);
-
    Pacer::start("AuxState:edgeAuxState2", 2);
    parallelForOuter(
        "edgeAuxState2", {Mesh->NEdgesAll},
        KOKKOS_LAMBDA(int IEdge, const TeamMember &Team) {
-          LocPseudoThicknessAux.computeVarsOnEdge(Team, IEdge, PseudoThickCell,
-                                                  NormalVelEdge);
-
-          LocVelocityDel2Aux.computeVarsOnEdge(Team, IEdge, VelocityDivCell,
-                                               RelVortVertex);
+          const int KMin   = MinLayerEdgeBot(IEdge);
+          const int KMax   = MaxLayerEdgeTop(IEdge);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocPseudoThicknessAux.computeVarsOnEdge(
+                     IEdge, KChunk, PseudoThickCell, NormalVelEdge);
+                 LocVelocityDel2Aux.computeVarsOnEdge(
+                     IEdge, KChunk, VelocityDivCell, RelVortVertex);
+              });
        });
-
    parallelForOuter(
        "edgeAuxState2", {Mesh->NEdgesAll},
        KOKKOS_LAMBDA(int IEdge, const TeamMember &Team) {
-          LocVorticityAux.computeVarsOnEdge(Team, IEdge);
+          const int KMin   = MinLayerEdgeTop(IEdge);
+          const int KMax   = MaxLayerEdgeBot(IEdge);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocVorticityAux.computeVarsOnEdge(IEdge, KChunk);
+              });
        });
    Pacer::stop("AuxState:edgeAuxState2", 2);
-
    Pacer::start("AuxState:vertexAuxState2", 2);
    parallelForOuter(
        "vertexAuxState2",
        LaunchConfig({Mesh->NVerticesAll},
                     TeamScratch<Real>(VCoord->NVertLayers)),
        KOKKOS_LAMBDA(int IVertex, const TeamMember &Team) {
-          LocVelocityDel2Aux.computeVarsOnVertex(Team, IVertex);
+          // Del2RelVortVertex is computed over the full vertex valid range
+          // [MinLayerVertexTop, MaxLayerVertexBot] so that boundary-vertex
+          // layers read by the biharmonic velocity tendency are valid rather
+          // than fill values (see VelocityDel2AuxVars::computeVarsOnVertex).
+          const int KMin   = MinLayerVertexTop(IVertex);
+          const int KMax   = MaxLayerVertexBot(IVertex);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocVelocityDel2Aux.computeVarsOnVertex(IVertex, KChunk);
+              });
        });
    Pacer::stop("AuxState:vertexAuxState2", 2);
-
    Pacer::start("AuxState:cellAuxState2", 2);
    parallelForOuter(
        "cellAuxState2",
        LaunchConfig({Mesh->NCellsAll}, TeamScratch<Real>(VCoord->NVertLayers)),
        KOKKOS_LAMBDA(int ICell, const TeamMember &Team) {
-          LocVelocityDel2Aux.computeVarsOnCell(Team, ICell);
+          const int KMin   = MinLayerCell(ICell);
+          const int KMax   = MaxLayerCell(ICell);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocVelocityDel2Aux.computeVarsOnCell(ICell, KChunk);
+              });
        });
    Pacer::stop("AuxState:cellAuxState2", 2);
-
    Pacer::start("AuxState:computeVerticalPseudoVelocity", 2);
-
    const auto &FluxPseudoThickEdge = PseudoThicknessAux.FluxPseudoThickEdge;
    VAdv->computeVerticalPseudoVelocity(NormalVelEdge, FluxPseudoThickEdge,
                                        PseudoThickCell, ProjDtSeconds);
-
    Pacer::stop("AuxState:computeVerticalPseudoVelocity", 2);
-
    Pacer::stop("AuxState:computeMomAux", 1);
 }
 
@@ -359,40 +369,49 @@ void AuxiliaryState::computeTracerAux(const OceanState *State,
 void AuxiliaryState::computeAll(const OceanState *State,
                                 const Array3DReal &TracerArray,
                                 int ThickTimeLevel, int VelTimeLevel,
-                                const TimeInterval ProjDt) const {
+                                const TimeInterval ProjDt,
+                                const Array2DReal &VertDiff) const {
    Array2DReal PseudoThickCell = State->getPseudoThickness(ThickTimeLevel);
-   Array2DReal NormalVelEdge   = State->getNormalVelocity(VelTimeLevel);
-
    const int NTracers = TracerArray.extent_int(0);
-
    OMEGA_SCOPE(LocPseudoThicknessAux, PseudoThicknessAux);
    OMEGA_SCOPE(LocTracerAux, TracerAux);
    OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
    OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
    OMEGA_SCOPE(MinLayerEdgeBot, VCoord->MinLayerEdgeBot);
    OMEGA_SCOPE(MaxLayerEdgeTop, VCoord->MaxLayerEdgeTop);
-
    R8 TimeStepSeconds;
    TimeStep.get(TimeStepSeconds, TimeUnits::Seconds);
    R8 ProjDtSeconds;
    ProjDt.get(ProjDtSeconds, TimeUnits::Seconds);
 
    Pacer::start("AuxState:computeAll", 1);
-
    computeMomAux(State, TracerArray, ThickTimeLevel, VelTimeLevel, ProjDt);
-
    const auto &MeanPseudoThickEdge = PseudoThicknessAux.MeanPseudoThickEdge;
-
-   Pacer::start("AuxState:cellTracerAux", 2);
+   Pacer::start("AuxState:cellAuxState4", 2);
    parallelForOuter(
        "tracerCellAux",
        LaunchConfig({NTracers, Mesh->NCellsAll},
                     TeamScratch<Real>(VCoord->NVertLayers)),
        KOKKOS_LAMBDA(int LTracer, int ICell, const TeamMember &Team) {
-          LocTracerAux.computeVarsOnCells(Team, LTracer, ICell,
-                                          MeanPseudoThickEdge, TracerArray);
+          const int KMin   = MinLayerCell(ICell);
+          const int KMax   = MaxLayerCell(ICell);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocTracerAux.computeVarsOnCells(
+                     LTracer, ICell, KChunk, MeanPseudoThickEdge, TracerArray);
+              });
        });
-   Pacer::stop("AuxState:cellTracerAux", 2);
+   Pacer::stop("AuxState:cellAuxState4", 2);
+   // NOTE: The physical mixing diagnostic (PhysicalMixingAux) is
+   // deliberately NOT computed here. computeAll is invoked once per RK
+   // stage on provisional tracer state, and (via the VertDiff default
+   // argument) on a VertDiff that has not yet been refreshed for this time
+   // step. Computing the diagnostic here would make it reflect stale,
+   // intermediate values rather than the finalized step. It is instead
+   // computed once per step, after the implicit vertical mixing solve, via
+   // AuxiliaryState::computePhysicalMixing (called from
+   // VertMix::VertMixImplicit).
 
    computeTransportVelocity(State, VelTimeLevel);
 
@@ -404,9 +423,15 @@ void AuxiliaryState::computeAll(const OceanState *State,
        "thickCellAux",
        LaunchConfig({Mesh->NCellsAll}, TeamScratch<Real>(VCoord->NVertLayers)),
        KOKKOS_LAMBDA(int ICell, const TeamMember &Team) {
-          LocPseudoThicknessAux.computeVarsOnCells(Team, ICell, PseudoThickCell,
-                                                   NormalTransportVelocity,
-                                                   TimeStepSeconds);
+          const int KMin   = MinLayerCell(ICell);
+          const int KMax   = MaxLayerCell(ICell);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocPseudoThicknessAux.computeVarsOnCells(
+                     ICell, KChunk, PseudoThickCell, NormalTransportVelocity,
+                     TimeStepSeconds);
+              });
        });
    Pacer::stop("AuxState:cellThickAux", 2);
 
@@ -416,11 +441,49 @@ void AuxiliaryState::computeAll(const OceanState *State,
 
    Pacer::stop("AuxState:computeAll", 1);
 }
-
 void AuxiliaryState::computeAll(const OceanState *State,
                                 const Array3DReal &TracerArray, int TimeLevel,
-                                const TimeInterval ProjDt) const {
-   computeAll(State, TracerArray, TimeLevel, TimeLevel, ProjDt);
+                                const TimeInterval ProjDt,
+                                const Array2DReal &VertDiff) const {
+   computeAll(State, TracerArray, TimeLevel, TimeLevel, ProjDt, VertDiff);
+}
+
+// Compute the physical mixing diagnostic on the finalized tracer and
+// vertical diffusivity fields for this time step. This must be called once
+// per step, after the RK stage loop has combined the final state and after
+// the implicit vertical mixing solve has refreshed VertDiff -- never from
+// inside the per-stage computeAll path.
+void AuxiliaryState::computePhysicalMixing(const Array3DReal &TracerArray,
+                                           const Array2DReal &VertDiff) const {
+   if (VertDiff.extent(0) == 0)
+      return;
+
+   const int NTracers = TracerArray.extent_int(0);
+   OMEGA_SCOPE(LocPhysicalMixingAux, PhysicalMixingAux);
+   OMEGA_SCOPE(MinLayerCell, VCoord->MinLayerCell);
+   OMEGA_SCOPE(MaxLayerCell, VCoord->MaxLayerCell);
+
+   Pacer::start("AuxState:computePhysicalMixing", 1);
+   parallelForOuter(
+       "computePhysicalMixing", {NTracers, Mesh->NCellsAll},
+       KOKKOS_LAMBDA(int LTracer, int ICell, const TeamMember &Team) {
+          // Skip DVD shadow tracers -- physical mixing of an advection-only
+          // squared-tracer copy is meaningless, and computing it wastes
+          // cycles.
+          if (LTracer == Tracers::IndxDVDT || LTracer == Tracers::IndxDVDS ||
+              LTracer == Tracers::IndxDVDT2 || LTracer == Tracers::IndxDVDS2)
+             return;
+
+          const int KMin   = MinLayerCell(ICell);
+          const int KMax   = MaxLayerCell(ICell);
+          const int KRange = vertRangeChunked(KMin, KMax);
+          parallelForInner(
+              Team, KRange, INNER_LAMBDA(int KChunk) {
+                 LocPhysicalMixingAux.computeVarsOnCells(
+                     LTracer, ICell, KChunk, VertDiff, TracerArray);
+              });
+       });
+   Pacer::stop("AuxState:computePhysicalMixing", 1);
 }
 
 void AuxiliaryState::computePseudoThicknessTracerAux(
@@ -516,21 +579,17 @@ AuxiliaryState *AuxiliaryState::create(const std::string &Name,
    OMEGA_REQUIRE(
        VAdv, "Null VertAdv pointer in AuxiliaryState::create with Name = {}",
        Name);
-
    if (AllAuxStates.find(Name) != AllAuxStates.end()) {
       LOG_ERROR("Attempted to create a new AuxiliaryState with name {} but it "
                 "already exists",
                 Name);
       return nullptr;
    }
-
    auto *NewAuxState = new AuxiliaryState(Name, Mesh, MeshHalo, VCoord, VAdv,
                                           NTracers, TimeStep);
    AllAuxStates.emplace(Name, NewAuxState);
-
    return NewAuxState;
 }
-
 // Create the default auxiliary state. Assumes that HorzMesh, VertCoord,
 // VertAdv, and Halo have been initialized.
 void AuxiliaryState::init() {
@@ -548,33 +607,26 @@ void AuxiliaryState::init() {
    const TimeStepper *DefTimeStepper = TimeStepper::getDefault();
    OMEGA_REQUIRE(DefTimeStepper,
                  "Null default TimeStepper pointer in AuxiliaryState::init");
-
    int NTracers          = Tracers::getNumTracers();
    TimeInterval TimeStep = DefTimeStepper->getTimeStep();
-
    AuxiliaryState::DefaultAuxState = AuxiliaryState::create(
        "Default", DefMesh, DefHalo, DefVCoord, DefVAdv, NTracers, TimeStep);
-
    Config *OmegaConfig = Config::getOmegaConfig();
    OMEGA_REQUIRE(OmegaConfig,
                  "Null OmegaConfig pointer in AuxiliaryState::init");
    DefaultAuxState->readConfigOptions(OmegaConfig);
 }
-
 // Get the default auxiliary state
 AuxiliaryState *AuxiliaryState::getDefault() {
    return AuxiliaryState::DefaultAuxState;
 }
-
 // Get auxiliary state by name
 AuxiliaryState *AuxiliaryState::get(const std::string &Name) {
    // look for an instance of this name
    auto it = AllAuxStates.find(Name);
-
    // if found, return the pointer
    if (it != AllAuxStates.end()) {
       return it->second.get();
-
       // otherwise print error and return null pointer
    } else {
       LOG_ERROR("AuxiliaryState::get: Attempt to retrieve non-existent "
@@ -583,32 +635,25 @@ AuxiliaryState *AuxiliaryState::get(const std::string &Name) {
       return nullptr;
    }
 }
-
 // Remove auxiliary state by name
 void AuxiliaryState::erase(const std::string &Name) {
    AllAuxStates.erase(Name);
 }
-
 // Remove all auxiliary states
 void AuxiliaryState::clear() {
    AllAuxStates.clear();
    DefaultAuxState = nullptr; // prevent dangling pointer
 }
-
 // Read and set config options
 void AuxiliaryState::readConfigOptions(Config *OmegaConfig) {
-
    Error Err; // error code
-
    Config AdvectConfig("Advection");
    Err += OmegaConfig->get(AdvectConfig);
    CHECK_ERROR_ABORT(Err, "AuxiliaryState: Advection group not in Config");
-
    std::string FluxThickTypeStr;
    Err += AdvectConfig.get("FluxThicknessType", FluxThickTypeStr);
    CHECK_ERROR_ABORT(
        Err, "AuxiliaryState: FluxThicknessType not found in AdvectConfig");
-
    if (FluxThickTypeStr == "Center") {
       this->PseudoThicknessAux.FluxThickEdgeChoice =
           FluxThickEdgeOption::Center;
@@ -619,13 +664,11 @@ void AuxiliaryState::readConfigOptions(Config *OmegaConfig) {
       ABORT_ERROR("AuxiliaryState: Unknown FluxThicknessType requested");
    }
 }
-
 //------------------------------------------------------------------------------
 // Perform auxiliary state halo exchange
 // Note that only non-computed auxiliary variables needs to be exchanged
 I4 AuxiliaryState::exchangeHalo() {
    I4 Err = 0;
-
    // Performing halo exchange on individual tracers because full halo exchange
    // on a 2D array assumes the first dimension is the vertical
    const I4 NTracers =
@@ -635,9 +678,6 @@ I4 AuxiliaryState::exchangeHalo() {
           SurfTracerRestAux.TracersMonthlySurfClimoCell, LTracer, Kokkos::ALL);
       Err += MeshHalo->exchangeFullArrayHalo(TracerSurfClimoCell, OnCell);
    }
-
    return Err;
-
 } // end exchangeHalo
-
 } // namespace OMEGA

@@ -24,7 +24,7 @@ ForwardBackwardStepper::ForwardBackwardStepper(
 
 //------------------------------------------------------------------------------
 // Advance the state by one step of the forward-backward scheme
-void ForwardBackwardStepper::doStep(
+void ForwardBackwardStepper::doStepImpl(
     OceanState *State,   // input model state
     TimeInstant &SimTime // current simulation time
 ) const {

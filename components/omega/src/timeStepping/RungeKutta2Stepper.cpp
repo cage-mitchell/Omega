@@ -24,7 +24,7 @@ RungeKutta2Stepper::RungeKutta2Stepper(
 
 //------------------------------------------------------------------------------
 // Advance the state by one step of the midpoint Runge Kutta scheme
-void RungeKutta2Stepper::doStep(OceanState *State,   // model state
+void RungeKutta2Stepper::doStepImpl(OceanState *State,   // model state
                                 TimeInstant &SimTime // current simulation time
 ) const {
 
