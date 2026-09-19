@@ -28,8 +28,8 @@ class SplitExplicitRK2Stepper : public TimeStepper {
    bool isSplit() const override;
 
    /// Advance the state by one split-explicit RK2 step.
-   void doStep(OceanState *State,   ///< [inout] model state
-               TimeInstant &SimTime ///< [inout] current simulation time
+   void doStepImpl(OceanState *State,    ///< [inout] model state
+                   TimeInstant &SimTime ///< [inout] current simulation time
    ) const override;
 
    /// Initialize split-explicit state after initial/restart input is read.

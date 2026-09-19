@@ -133,13 +133,13 @@ class TimeStepper {
                           TimeInstant &SimTime ///< [inout] current simulation time
    ) const = 0;
 
+ public:
+
    /// Optional method-specific state initialization after initial/restart read.
    virtual void initializeStateFromInput(
        OceanState *, ///< [inout] model state after input has been read
        bool          ///< [in] true if restart input initialized the state
    ) const {}
-
- public:
 
    /// 1st phase of Initialization for the default time stepper
    static void init1();

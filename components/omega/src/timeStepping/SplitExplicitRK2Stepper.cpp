@@ -522,8 +522,8 @@ void SplitExplicitRK2Stepper::finalizeTimeStepIterationState(
 }
 
 //------------------------------------------------------------------------------
-void SplitExplicitRK2Stepper::doStep(OceanState *State,
-                                     TimeInstant &SimTime) const {
+void SplitExplicitRK2Stepper::doStepImpl(OceanState *State,
+                                         TimeInstant &SimTime) const {
 
    if (!State)
       LOG_CRITICAL("Invalid State");
